@@ -26,7 +26,7 @@ Emit = Callable[[dict], Awaitable[None]]
 log = logging.getLogger("speech")
 
 DG_URL = "wss://api.deepgram.com/v1/listen"
-STALL = float(os.getenv("SPEECH_STALL_S", "1.2"))
+STALL = float(os.getenv("SPEECH_STALL_S", "1.5"))
 DEFAULT_KEYTERMS = [
     "appointment", "pharmacy", "prescription", "refill", "confirmation",
     "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
@@ -321,3 +321,51 @@ async def run_captions(call_id: str, listen_url: str, emit: Emit, goal: str = ""
             s = sorted(stats)
             log.info("caption latency call=%s n=%d median=%.2fs p90=%.2fs", call_id, len(s), s[len(s) // 2],
                      s[int(len(s) * 0.9) - 1 if len(s) > 1 else 0])
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Demo mode (no phone call needed): Deepgram TTS speaks a scripted "other party", streamed in real time through a
+# local fake Vapi listen socket into run_captions -> real Deepgram captions + intel facts on the normal emit path.
+DEMO_THEM = [
+    "Hi, this is Green Valley Pharmacy. How can I help you today?",
+    "Okay, your prescription refill is ready. We can do pickup on Tuesday at 3:30 PM. "
+    "Your confirmation number is 4 8 2 7 1.",
+    "We're at 1 2 5 Main Street. The copay is $15. Anything else?",
+]
+
+
+async def _demo_tts(text: str, sr: int = 16000) -> bytes:
+    import httpx
+    async with httpx.AsyncClient(timeout=60) as c:
+        r = await c.post("https://api.deepgram.com/v1/speak",
+                         params={"model": "aura-2-thalia-en", "encoding": "linear16", "sample_rate": sr,
+                                 "container": "none"},
+                         headers={"Authorization": f"Token {os.getenv('DEEPGRAM_API_KEY', '')}"},
+                         json={"text": text})
+        r.raise_for_status()
+        return r.content
+
+
+async def run_demo(call_id: str, emit: Emit, goal: str = "refill my prescription", pause_s: float = 2.0) -> None:
+    sr = 16000
+    clips = await asyncio.gather(*[_demo_tts(t, sr) for t in DEMO_THEM])
+    silence = b"\0" * int(sr * 2 * pause_s)
+    mono = silence[: sr] + silence.join(clips) + silence
+    stereo = bytearray(len(mono) * 2)  # them on ch0, silence on ch1
+    stereo[0::4] = mono[0::2]
+    stereo[1::4] = mono[1::2]
+    frame = sr * 4 // 50  # 20 ms
+
+    async def handler(ws):
+        await ws.send(json.dumps({"type": "start", "encoding": "linear16", "container": "raw",
+                                  "sampleRate": sr, "channels": 2}))
+        start = time.monotonic()
+        for i in range(0, len(stereo), frame):
+            await ws.send(bytes(stereo[i:i + frame]))
+            await asyncio.sleep(max(0.0, start + (i + frame) / (sr * 4) - time.monotonic()))
+        await asyncio.sleep(2)
+        await ws.close()
+
+    async with websockets.serve(handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        await run_captions(call_id, f"ws://127.0.0.1:{port}/listen", emit, goal=goal)
