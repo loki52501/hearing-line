@@ -1,3 +1,175 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><title>Hearing Line</title></head>
-<body><h1>Hearing Line</h1><p>Placeholder. Owner: frontend agent.</p></body></html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hearing Line</title>
+<style>
+  :root {
+    --bg: #0b0d10;
+    --panel: #15191f;
+    --line: #2c333d;
+    --text: #f5f7fa;
+    --muted: #a3adba;
+    --interim: #8d97a5;
+    --them: #ffd447;      /* warm yellow for the other person */
+    --me: #5ec8ff;        /* cyan for you */
+    --ok: #3ddc84;
+    --warn: #ffb020;
+    --bad: #ff5c5c;
+    --focus: #ffffff;
+    --cap-size: 28px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 20px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  :focus-visible { outline: 4px solid var(--focus); outline-offset: 3px; }
+  button, input, textarea { font: inherit; color: inherit; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+  header {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 12px 20px; border-bottom: 2px solid var(--line); background: var(--panel);
+  }
+  header h1 { margin: 0; font-size: 26px; letter-spacing: .02em; }
+  .fake-badge { background: var(--warn); color: #000; font-weight: 800; padding: 2px 10px; border-radius: 6px; font-size: 16px; }
+  .status {
+    margin-left: auto; display: flex; align-items: center; gap: 10px;
+    font-weight: 800; font-size: 22px; text-transform: uppercase; letter-spacing: .05em;
+  }
+  .dot { width: 18px; height: 18px; border-radius: 50%; background: var(--muted); }
+  .status[data-s="ringing"] .dot, .status[data-s="queued"] .dot { background: var(--warn); animation: pulse 1s infinite; }
+  .status[data-s="connected"] .dot { background: var(--ok); }
+  .status[data-s="ended"] .dot, .status[data-s="error"] .dot { background: var(--bad); }
+  .callee { color: var(--muted); font-weight: 600; font-size: 20px; text-transform: none; letter-spacing: 0; }
+  @keyframes pulse { 50% { opacity: .25; } }
+
+  /* Setup screen */
+  #setup { max-width: 720px; margin: 6vh auto; padding: 0 20px; }
+  #setup h2 { font-size: 34px; margin: 0 0 8px; }
+  #setup p.lead { color: var(--muted); margin: 0 0 28px; }
+  label { display: block; font-weight: 700; margin: 20px 0 8px; font-size: 22px; }
+  .field {
+    width: 100%; padding: 14px 16px; font-size: 24px;
+    background: #000; border: 2px solid var(--line); border-radius: 10px;
+  }
+  .field:focus { border-color: var(--me); }
+  .btn-call {
+    margin-top: 28px; width: 100%; padding: 22px; font-size: 30px; font-weight: 800;
+    background: var(--ok); color: #000; border: 0; border-radius: 14px; cursor: pointer;
+  }
+  .btn-call:disabled { opacity: .5; cursor: wait; }
+  .error { color: var(--bad); font-weight: 700; margin-top: 16px; min-height: 1.4em; }
+
+  /* Call screen */
+  #call { display: none; height: calc(100% - 64px); }
+  body.in-call #setup { display: none; }
+  body.in-call #call { display: grid; }
+  #call { grid-template-columns: 1fr 360px; grid-template-rows: 1fr auto; }
+  #captions {
+    grid-column: 1; grid-row: 1; overflow-y: auto; padding: 20px 24px 40px;
+    font-size: var(--cap-size); line-height: 1.4;
+  }
+  .line { margin: 0 0 18px; padding: 8px 14px; border-left: 8px solid var(--line); border-radius: 4px; }
+  .line .who { display: block; font-size: 18px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
+  .line.them { border-color: var(--them); }
+  .line.them .who { color: var(--them); }
+  .line.me { border-color: var(--me); background: rgba(94, 200, 255, .06); }
+  .line.me .who { color: var(--me); }
+  .line.interim .txt { color: var(--interim); font-style: italic; }
+  .line.flash { animation: flash .8s ease-out; }
+  @keyframes flash { from { background: rgba(255, 255, 255, .18); } }
+  .sys { color: var(--muted); font-size: 20px; text-align: center; margin: 10px 0 18px; }
+
+  #facts {
+    grid-column: 2; grid-row: 1 / span 2; border-left: 2px solid var(--line);
+    background: var(--panel); padding: 18px; overflow-y: auto;
+  }
+  #facts h2 { margin: 0 0 14px; font-size: 24px; }
+  #factList { list-style: none; margin: 0; padding: 0; }
+  .fact { background: #000; border: 2px solid var(--line); border-radius: 12px; padding: 12px 14px; margin-bottom: 12px; }
+  .fact .lbl { color: var(--muted); font-size: 17px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+  .fact .val { font-size: 28px; font-weight: 800; line-height: 1.25; word-break: break-word; }
+  .fact.new { border-color: var(--them); animation: flash 1.2s ease-out; }
+  .empty { color: var(--muted); }
+
+  #composer { grid-column: 1; grid-row: 2; border-top: 2px solid var(--line); background: var(--panel); padding: 12px 20px 16px; }
+  .quick { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; }
+  .quick button {
+    padding: 10px 16px; font-size: 20px; font-weight: 700; cursor: pointer;
+    background: #000; border: 2px solid var(--me); border-radius: 999px;
+  }
+  .quick button:hover { background: rgba(94, 200, 255, .15); }
+  .quick kbd { color: var(--muted); font-size: 14px; margin-left: 6px; }
+  .say { display: flex; gap: 10px; }
+  .say .field { flex: 1; }
+  .say button { padding: 0 26px; font-size: 24px; font-weight: 800; background: var(--me); color: #000; border: 0; border-radius: 10px; cursor: pointer; }
+  .call-actions { display: flex; gap: 10px; margin-top: 10px; }
+  .call-actions button { padding: 8px 18px; font-size: 18px; font-weight: 700; background: transparent; border: 2px solid var(--line); border-radius: 8px; cursor: pointer; }
+  .hint { color: var(--muted); font-size: 16px; margin-left: auto; align-self: center; }
+
+  @media (max-width: 900px) {
+    #call { grid-template-columns: 1fr; grid-template-rows: auto 1fr auto; }
+    #facts { grid-column: 1; grid-row: 1; border-left: 0; border-bottom: 2px solid var(--line); max-height: 30vh; }
+    #captions { grid-row: 2; }
+    #composer { grid-row: 3; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Hearing Line</h1>
+  <span id="fakeBadge" class="fake-badge" hidden>DEMO MODE</span>
+  <div id="status" class="status" data-s="idle" role="status" aria-live="polite">
+    <span class="dot" aria-hidden="true"></span>
+    <span id="statusText">Ready</span>
+    <span id="callee" class="callee"></span>
+  </div>
+</header>
+
+<main id="setup">
+  <h2>Place a call</h2>
+  <p class="lead">We dial for you. You read live captions and type replies; we speak them aloud.</p>
+  <form id="callForm" autocomplete="off">
+    <label for="to">Phone number</label>
+    <input id="to" class="field" type="tel" inputmode="tel" placeholder="+1 555 123 4567" required>
+    <label for="goal">What's the call about?</label>
+    <textarea id="goal" class="field" rows="3" placeholder="Book a dental cleaning next week, afternoons preferred"></textarea>
+    <button id="callBtn" class="btn-call" type="submit">Call</button>
+    <div id="setupError" class="error" role="alert"></div>
+  </form>
+</main>
+
+<div id="call">
+  <section id="captions" role="log" aria-live="polite" aria-label="Live captions"></section>
+
+  <aside id="facts" aria-label="Key facts">
+    <h2>Key facts</h2>
+    <p id="factsEmpty" class="empty">Times, dates, addresses and numbers will appear here.</p>
+    <ul id="factList" aria-live="polite"></ul>
+  </aside>
+
+  <section id="composer" aria-label="Reply">
+    <div class="quick" id="quick"></div>
+    <form id="sayForm" class="say" autocomplete="off">
+      <label for="sayText" class="sr-only">Type what you want to say</label>
+      <input id="sayText" class="field" type="text" placeholder="Type your reply, press Enter to speak it">
+      <button type="submit">Say</button>
+    </form>
+    <div class="call-actions">
+      <button id="bigger" type="button">A+ Bigger text</button>
+      <button id="smaller" type="button">A− Smaller</button>
+      <button id="newCall" type="button">New call</button>
+      <span class="hint">Alt+1–5 quick replies · / focuses the reply box</span>
+    </div>
+  </section>
+</div>
+
+<script src="fake.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
