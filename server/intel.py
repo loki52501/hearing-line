@@ -48,9 +48,13 @@ _seen: dict[str, set[tuple[str, str]]] = {}
 def extract(text: str) -> dict[str, str]:
     out = {}
     for kind, pat in PATTERNS.items():
-        m = pat.search(text)
+        hay = text
+        if kind == "reference":  # blank out times, prices and phone-free addresses so "3:30PM" is not a ref
+            for k in ("time", "price", "address"):
+                hay = PATTERNS[k].sub(lambda m: " " * len(m.group(0)), hay)
+        m = pat.search(hay)
         if m:
-            out[kind] = m.group(0).strip()
+            out[kind] = m.group(0).strip().rstrip(".,")
     return out
 
 

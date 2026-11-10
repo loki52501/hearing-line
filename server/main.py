@@ -66,7 +66,8 @@ async def api_call(req: CallReq):
         raise HTTPException(502, f"start_call failed: {e}")
     await bus.publish(call_id, {"type": "call_status", "status": "queued"})
     _tasks[call_id] = asyncio.create_task(_run_captions(call_id, req.goal))
-    return {"callId": call_id}
+    join = getattr(telephony, "join_url", lambda _id: None)(call_id)
+    return {"callId": call_id, "joinUrl": join}
 
 
 @app.post("/api/say")
