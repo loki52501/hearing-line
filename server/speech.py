@@ -89,6 +89,14 @@ def _speaker_for_channel(ch: int) -> str:
     return "them" if ch == them_ch else "me"
 
 
+_SPACED_DIGITS = re.compile(r"\b\d(?:,? \d\b){3,}")
+
+
+def join_digits(text: str) -> str:
+    """'4 8 2 7 1' -> '48271' (confirmation/phone numbers read digit by digit)."""
+    return _SPACED_DIGITS.sub(lambda m: re.sub(r"[ ,]", "", m.group(0)), text)
+
+
 def parse_dg_result(msg: dict, channels: int) -> Optional[dict]:
     """Deepgram Results message -> caption dict (or None)."""
     if msg.get("type") != "Results":
@@ -96,7 +104,7 @@ def parse_dg_result(msg: dict, channels: int) -> Optional[dict]:
     alts = (msg.get("channel") or {}).get("alternatives") or []
     if not alts:
         return None
-    text = (alts[0].get("transcript") or "").strip()
+    text = join_digits((alts[0].get("transcript") or "").strip())
     if not text:
         return None
     if channels > 1:
@@ -162,6 +170,7 @@ async def run_captions(call_id: str, listen_url: str, emit: Emit, goal: str = ""
     stats = latency.setdefault(call_id, [])
     istats = latency_interim.setdefault(call_id, [])
     open_interim: dict[int, tuple[str, float]] = {}  # channel -> (latest interim text, when it changed)
+    acc: dict[int, list[str]] = {}  # channel -> finalized segments of the current utterance
     t0: Optional[float] = None  # wall clock when first audio byte arrived
 
     async def open_dg():
@@ -183,26 +192,54 @@ async def run_captions(call_id: str, listen_url: str, emit: Emit, goal: str = ""
             async for raw in dg_ws:
                 msg = json.loads(raw)
                 if msg.get("type") == "UtteranceEnd":
-                    # speaker went quiet: force Deepgram to flush a final now instead of waiting.
-                    await dg_ws.send(json.dumps({"type": "Finalize"}))
+                    # speaker went quiet: emit what we have for that channel as one final caption.
+                    chans = msg.get("channel") or []
+                    for ch in ([chans[0]] if chans else list(acc)):
+                        await flush(ch)
+                    continue
+                if msg.get("type") != "Results":
                     continue
                 cap = parse_dg_result(msg, channels)
-                if cap:
-                    ch = (msg.get("channel_index") or [0])[0]
-                    if cap["final"]:
-                        open_interim.pop(ch, None)
-                    elif cap["speaker"] == "them" and open_interim.get(ch, (None,))[0] != cap["text"]:
-                        open_interim[ch] = (cap["text"], time.monotonic())
-                    if t0 is not None:
-                        words = ((msg.get("channel") or {}).get("alternatives") or [{}])[0].get("words") or []
-                        end = words[-1]["end"] if words else (msg.get("start") or 0) + (msg.get("duration") or 0)
-                        lat = round(time.monotonic() - (t0 + end), 3)
-                        (stats if cap["final"] else istats).append(lat)
-                    await _send(emit, cap)
+                ch = (msg.get("channel_index") or [0])[0]
+                end_of_utt = bool(msg.get("speech_final") or msg.get("from_finalize"))
+                if cap is None:  # empty transcript, but may still mark end of utterance
+                    if end_of_utt:
+                        await flush(ch)
+                    continue
+                if t0 is not None:
+                    words = ((msg.get("channel") or {}).get("alternatives") or [{}])[0].get("words") or []
+                    end = words[-1]["end"] if words else (msg.get("start") or 0) + (msg.get("duration") or 0)
+                    lat = round(time.monotonic() - (t0 + end), 3)
+                    (stats if cap["final"] else istats).append(lat)
+                parts = acc.setdefault(ch, [])
+                if cap["final"]:
+                    parts.append(cap["text"])
+                    open_interim[ch] = (" ".join(parts), time.monotonic())
+                    if end_of_utt:
+                        await flush(ch)
+                        continue
+                    shown = " ".join(parts)
+                else:
+                    shown = " ".join(parts + [cap["text"]])
+                    if open_interim.get(ch, (None,))[0] != shown:
+                        open_interim[ch] = (shown, time.monotonic())
+                await _send(emit, {**cap, "text": shown, "final": False})
         except websockets.ConnectionClosed:
             pass
         except Exception:
             log.exception("deepgram reader error")
+        finally:
+            for ch in list(acc):
+                await flush(ch)
+
+    async def flush(ch: int):
+        """Emit the accumulated Deepgram final segments for a channel as ONE final caption (full sentence for
+        intel, e.g. 'Your confirmation number is 4 8 2 7 1' instead of two fragments)."""
+        parts = acc.pop(ch, None)
+        open_interim.pop(ch, None)
+        if parts:
+            speaker = _speaker_for_channel(ch) if channels > 1 else "them"
+            await _send(emit, {"type": "caption", "speaker": speaker, "text": " ".join(parts), "final": True})
 
     async def keepalive():
         # KeepAlive every 5 s; and if a channel's interim text hasn't changed for STALL s, send Finalize so the
