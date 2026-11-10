@@ -48,10 +48,10 @@ class SayReq(BaseModel):
     text: str
 
 
-async def _run_captions(call_id: str) -> None:
+async def _run_captions(call_id: str, goal: str = "") -> None:
     try:
         url = telephony.listen_url(call_id)
-        await speech.run_captions(call_id, url, call_emit(call_id))
+        await speech.run_captions(call_id, url, call_emit(call_id), goal=goal)
     except Exception:
         log.exception("captions task failed for %s", call_id)
 
@@ -65,7 +65,7 @@ async def api_call(req: CallReq):
         log.exception("start_call failed")
         raise HTTPException(502, f"start_call failed: {e}")
     await bus.publish(call_id, {"type": "call_status", "status": "queued"})
-    _tasks[call_id] = asyncio.create_task(_run_captions(call_id))
+    _tasks[call_id] = asyncio.create_task(_run_captions(call_id, req.goal))
     return {"callId": call_id}
 
 
