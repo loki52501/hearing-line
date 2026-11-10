@@ -72,8 +72,41 @@ def _assistant(goal: str) -> dict:
     return a
 
 
+def _store(data: dict) -> str:
+    call_id = data["id"]
+    mon = data.get("monitor") or {}
+    _calls[call_id] = {"controlUrl": mon.get("controlUrl"), "listenUrl": mon.get("listenUrl"),
+                       "joinUrl": data.get("webCallUrl")}
+    return call_id
+
+
+async def _start_web_call(goal: str) -> str:
+    """Fallback: Vapi web call. The other party joins via join_url(call_id) in a browser."""
+    async with httpx.AsyncClient(timeout=20) as c:
+        # /call/web requires the PUBLIC key (private key returns 401).
+        key = os.getenv("VAPI_PUBLIC_KEY") or _api_key()
+        r = await c.post(f"{VAPI_BASE}/call/web", json={"assistant": _assistant(goal)},
+                         headers={"Authorization": f"Bearer {key}"})
+    if r.status_code >= 300:
+        raise RuntimeError(f"Vapi /call/web {r.status_code}: {r.text[:300]}")
+    call_id = _store(r.json())
+    log.warning("WEB CALL %s: other party joins at %s", call_id, _calls[call_id]["joinUrl"])
+    return call_id
+
+
+def join_url(call_id: str) -> str | None:
+    """Browser join link when the call is a web-call fallback (else None)."""
+    return (_calls.get(call_id) or {}).get("joinUrl")
+
+
 async def start_call(to: str, goal: str) -> str:
-    """Place an outbound call; return call_id."""
+    """Place an outbound call; return call_id.
+
+    to="web" or TELEPHONY_MODE=web forces a browser web call. If Vapi refuses the phone
+    call (daily outbound limit on free numbers), falls back to a web call automatically.
+    """
+    if (to or "").strip().lower() == "web" or os.getenv("TELEPHONY_MODE", "").lower() == "web":
+        return await _start_web_call(goal)
     phone_id = os.getenv("VAPI_PHONE_NUMBER_ID")
     if not phone_id:
         raise RuntimeError("VAPI_PHONE_NUMBER_ID not set")
@@ -82,11 +115,13 @@ async def start_call(to: str, goal: str) -> str:
         r = await c.post(f"{VAPI_BASE}/call", json=body,
                          headers={"Authorization": f"Bearer {_api_key()}"})
     if r.status_code >= 300:
+        if r.status_code == 400 and "limit" in r.text.lower():
+            log.warning("phone call refused (outbound limit); falling back to web call")
+            return await _start_web_call(goal)
         raise RuntimeError(f"Vapi /call {r.status_code}: {r.text[:300]}")
     data = r.json()
-    call_id = data["id"]
+    call_id = _store(data)
     mon = data.get("monitor") or {}
-    _calls[call_id] = {"controlUrl": mon.get("controlUrl"), "listenUrl": mon.get("listenUrl")}
     log.info("call %s placed to %s (listen=%s control=%s)", call_id, _mask(to),
              bool(mon.get("listenUrl")), bool(mon.get("controlUrl")))
     return call_id
