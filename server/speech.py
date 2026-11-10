@@ -5,8 +5,8 @@ run_captions(call_id, listen_url, emit):
   Deepgram results  --> emit({"type":"caption","speaker":"them"|"me","text":...,"final":bool})
 
 Channel mapping (Vapi listen, per telephony + Vapi docs): ch0 = customer -> "them", ch1 = assistant -> "me".
-SPEECH_SWAP_CHANNELS=1 flips it. SPEECH_EMIT_ME=1 also emits "me" captions from audio (off by default because
-main.py already publishes the typed /api/say text as a "me" caption).
+SPEECH_SWAP_CHANNELS=1 flips it. SPEECH_EMIT_ME=0 drops "me" captions from audio (on by default so the
+assistant's own lines show; the frontend dedupes them against typed replies).
 Fallback: if Deepgram is unavailable, Vapi's own `transcript` JSON events on the listen socket become captions.
 """
 from __future__ import annotations
@@ -26,6 +26,7 @@ Emit = Callable[[dict], Awaitable[None]]
 log = logging.getLogger("speech")
 
 DG_URL = "wss://api.deepgram.com/v1/listen"
+STALL = float(os.getenv("SPEECH_STALL_S", "1.2"))
 DEFAULT_KEYTERMS = [
     "appointment", "pharmacy", "prescription", "refill", "confirmation",
     "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
@@ -61,6 +62,7 @@ def deepgram_url(sample_rate: int = 16000, channels: int = 2, keyterms: Optional
         ("smart_format", "true"),
         ("interim_results", "true"),
         ("punctuate", "true"),
+        ("numerals", "true"),
         ("endpointing", "300"),
         ("utterance_end_ms", "1000"),
         ("vad_events", "true"),
@@ -123,7 +125,7 @@ def caption_from_vapi(msg: dict) -> Optional[dict]:
 
 
 async def _send(emit: Emit, cap: dict) -> None:
-    if cap["speaker"] == "me" and os.getenv("SPEECH_EMIT_ME", "0") != "1":
+    if cap["speaker"] == "me" and os.getenv("SPEECH_EMIT_ME", "1") != "1":
         return
     try:
         await emit(cap)
@@ -159,6 +161,7 @@ async def run_captions(call_id: str, listen_url: str, emit: Emit, goal: str = ""
     pending: list[bytes] = []
     stats = latency.setdefault(call_id, [])
     istats = latency_interim.setdefault(call_id, [])
+    open_interim: dict[int, tuple[str, float]] = {}  # channel -> (latest interim text, when it changed)
     t0: Optional[float] = None  # wall clock when first audio byte arrived
 
     async def open_dg():
@@ -185,8 +188,14 @@ async def run_captions(call_id: str, listen_url: str, emit: Emit, goal: str = ""
                     continue
                 cap = parse_dg_result(msg, channels)
                 if cap:
+                    ch = (msg.get("channel_index") or [0])[0]
+                    if cap["final"]:
+                        open_interim.pop(ch, None)
+                    elif cap["speaker"] == "them" and open_interim.get(ch, (None,))[0] != cap["text"]:
+                        open_interim[ch] = (cap["text"], time.monotonic())
                     if t0 is not None:
-                        end = (msg.get("start") or 0) + (msg.get("duration") or 0)
+                        words = ((msg.get("channel") or {}).get("alternatives") or [{}])[0].get("words") or []
+                        end = words[-1]["end"] if words else (msg.get("start") or 0) + (msg.get("duration") or 0)
                         lat = round(time.monotonic() - (t0 + end), 3)
                         (stats if cap["final"] else istats).append(lat)
                     await _send(emit, cap)
@@ -196,13 +205,25 @@ async def run_captions(call_id: str, listen_url: str, emit: Emit, goal: str = ""
             log.exception("deepgram reader error")
 
     async def keepalive():
+        # KeepAlive every 5 s; and if a channel's interim text hasn't changed for STALL s, send Finalize so the
+        # final caption (and the fact card) don't wait on Deepgram's VAD (seen stalling 5 s on clean silence).
+        last_ka = time.monotonic()
         while True:
-            await asyncio.sleep(5)
-            if dg_ws is not None:
-                try:
+            await asyncio.sleep(0.25)
+            if dg_ws is None:
+                continue
+            try:
+                now = time.monotonic()
+                stalled = [ch for ch, (_, ts) in open_interim.items() if now - ts > STALL]
+                if stalled:
+                    for ch in stalled:
+                        open_interim.pop(ch, None)
+                    await dg_ws.send(json.dumps({"type": "Finalize"}))
+                if now - last_ka > 5:
+                    last_ka = now
                     await dg_ws.send(json.dumps({"type": "KeepAlive"}))
-                except Exception:
-                    return
+            except Exception:
+                return
 
     reader_task = None
     ka_task = None
