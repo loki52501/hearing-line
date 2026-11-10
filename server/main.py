@@ -70,6 +70,23 @@ async def api_call(req: CallReq):
     return {"callId": call_id, "joinUrl": join}
 
 
+@app.post("/api/demo")
+async def api_demo():
+    """Backup demo: scripted call audio through the real Deepgram -> captions -> intel pipeline."""
+    import uuid
+    call_id = "demo-" + uuid.uuid4().hex[:8]
+    await bus.publish(call_id, {"type": "call_status", "status": "in-progress"})
+
+    async def run():
+        try:
+            await speech.run_demo(call_id, call_emit(call_id))
+        except Exception:
+            log.exception("demo failed")
+        await bus.publish(call_id, {"type": "call_status", "status": "ended"})
+    _tasks[call_id] = asyncio.create_task(run())
+    return {"callId": call_id, "joinUrl": None}
+
+
 @app.post("/api/say")
 async def api_say(req: SayReq):
     try:
