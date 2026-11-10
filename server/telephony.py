@@ -85,7 +85,9 @@ async def _start_web_call(goal: str) -> str:
     async with httpx.AsyncClient(timeout=20) as c:
         # /call/web requires the PUBLIC key (private key returns 401).
         key = os.getenv("VAPI_PUBLIC_KEY") or _api_key()
-        r = await c.post(f"{VAPI_BASE}/call/web", json={"assistant": _assistant(goal)},
+        a = _assistant(goal)
+        a["customerJoinTimeoutSeconds"] = 300  # give the other party time to open the link
+        r = await c.post(f"{VAPI_BASE}/call/web", json={"assistant": a},
                          headers={"Authorization": f"Bearer {key}"})
     if r.status_code >= 300:
         raise RuntimeError(f"Vapi /call/web {r.status_code}: {r.text[:300]}")
