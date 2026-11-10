@@ -78,14 +78,11 @@
     text = (text || "").trim();
     if (!text) return;
 
-    // Dedupe "me" captions we already displayed when the user sent them.
-    if (speaker === "me") {
-      const n = norm(text);
-      const idx = pendingSent.findIndex((p) => p === n || (!final && p.startsWith(n)));
-      if (idx !== -1) {
-        if (final) pendingSent.splice(idx, 1);
-        return;
-      }
+    // Dedupe "me" captions we already displayed when the user sent them
+    // (server echo of /api/say, plus speech transcribing our own TTS audio).
+    if (speaker === "me" && isOwnEcho(text)) {
+      if (interim.me && final) { interim.me.remove(); interim.me = null; }
+      return;
     }
 
     const wasNear = nearBottom();
@@ -104,6 +101,20 @@
       interim[speaker] = el;
     }
     scrollDown(wasNear);
+  }
+
+  function isOwnEcho(text) {
+    const now = Date.now();
+    while (pendingSent.length && now - pendingSent[0].t > 30000) pendingSent.shift();
+    const n = norm(text);
+    if (!n) return true;
+    const words = n.split(" ");
+    return pendingSent.some((p) => {
+      if (p.n === n || (" " + p.n + " ").includes(" " + n + " ")) return true;
+      const pw = new Set(p.n.split(" "));
+      const hit = words.filter((w) => pw.has(w)).length;
+      return words.length >= 3 && hit / words.length >= 0.8;
+    });
   }
 
   function showSent(text) {
@@ -214,13 +225,14 @@
     text = (text || "").trim();
     if (!text || !callId) return;
     showSent(text);
-    pendingSent.push(norm(text));
+    const entry = { n: norm(text), t: Date.now() };
+    pendingSent.push(entry);
     try {
       if (FAKE) await window.HLFake.say(callId, text, onEvent);
       else await postJson("/api/say", { callId, text });
     } catch (e) {
       sysLine("Not sent: “" + text + "” (" + e.message + ")");
-      const i = pendingSent.indexOf(norm(text));
+      const i = pendingSent.indexOf(entry);
       if (i !== -1) pendingSent.splice(i, 1);
     }
   }
