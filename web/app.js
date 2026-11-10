@@ -25,6 +25,7 @@
   // ---------- helpers ----------
   const norm = (s) => (s || "").toLowerCase().replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
   const last4 = (num) => {
+    if (/^web$/i.test((num || "").trim())) return "web call";
     const d = (num || "").replace(/\D/g, "");
     return d.length >= 4 ? "•••• " + d.slice(-4) : "••••";
   };
@@ -127,6 +128,23 @@
     scrollDown(true);
   }
 
+  function showJoin(url) {
+    const box = document.createElement("div");
+    box.className = "join";
+    const t = document.createElement("span");
+    t.textContent = "Web call — the other person joins here: ";
+    const a = document.createElement("a");
+    a.href = url; a.target = "_blank"; a.rel = "noopener"; a.textContent = url;
+    const b = document.createElement("button");
+    b.type = "button"; b.textContent = "Copy link";
+    b.addEventListener("click", () => {
+      (navigator.clipboard ? navigator.clipboard.writeText(url) : Promise.reject())
+        .then(() => { b.textContent = "Copied ✓"; }, () => { b.textContent = "Select the link to copy"; });
+    });
+    box.append(t, a, b);
+    capsEl.prepend(box);
+  }
+
   // ---------- facts ----------
   function addFact(label, value) {
     if (!value) return;
@@ -211,6 +229,7 @@
       $("to").value = ""; // don't keep the full number on screen
       setStatus("ringing");
       sysLine("Calling " + last4(to) + (goal ? " — " + goal : ""));
+      if (res.joinUrl) showJoin(res.joinUrl);
       if (!FAKE) openWs(callId);
       $("sayText").focus();
     } catch (e) {
